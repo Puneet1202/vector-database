@@ -1,6 +1,7 @@
 import { supabase } from '../utils/supabase.js';
 import { generateEmbedding } from '../services/aiService.js';
-import { SEARCH_THRESHOLD, SEARCH_COUNT } from '../config/config.js';
+import { config } from '../config/config.js'; 
+import { countTokens, logUsage } from '../services/tokenTracker.js';
 export const addNote = async (c) => {
   try {
     const { content } = await c.req.json(); // Frontend se data lena
@@ -23,87 +24,92 @@ export const addNote = async (c) => {
     return c.json({ success: false, error: err.message }, 500);
   }
 };
-/*
 
+// search notes universal
 export const searchNotes = async (c) => {
     try {
-        const { query } = await c.req.json(); // User ne kya search kiya (e.g. "Dessert")
+        const { query } = await c.req.json();
 
-        // 1. Search query ko Vector mein badlo
-        const queryEmbedding = await generateEmbedding(query);
+        if (!query) return c.json({ error: "Query is required" }, 400);
 
-        // 2. Supabase Function (match_notes) ko call karo
-        const { data, error } = await supabase.rpc('match_notes', {
-            query_embedding: queryEmbedding,
-            match_threshold: 0.4, // 30% se zyada match hone wale dikhao
-            match_count: SEARCH_COUNT,       // Top 5 matches dikhao
+        console.log(`\n--- 🚀 STARTING AUTOMATIC SEARCH PROCESS ---`);
+        console.log(`🔎 User Query: "${query}"`);
+
+        // 1. Vector Generation
+        const embedding = await generateEmbedding(query);
+        console.log(`✅ Vector Generated! Dimensions: ${embedding.length}`);
+
+        // --- DYNAMIC THRESHOLD LOGIC ---
+        // Config se sabse chota threshold nikaalte hain taaki DB se maximum potential data mile
+        const minThreshold = Math.min(...Object.values(config.thresholds));
+
+        // 2. Fetch Database Execution Plan (EXPLAIN ANALYZE)
+        const { data: report } = await supabase.rpc('get_search_report', {
+            query_embedding: embedding,
+            match_threshold: minThreshold, 
+            match_count: config.searchCount
+        });
+
+        console.log("📊 --- DATABASE SCAN & EXECUTION PLAN ---");
+        if (report) {
+            report.forEach(row => console.log(`| ${row.query_plan}`));
+        } else {
+            console.log("⚠️ Execution plan not available.");
+        }
+
+        // 3. Actual Data Fetching (Universal Search)
+        const { data: rawData, error } = await supabase.rpc('match_notes_universal', {
+            query_embedding: embedding,
+            match_threshold: minThreshold,
+            match_count: config.searchCount
         });
 
         if (error) throw error;
 
-        // 3. Results wapas bhejo
-        return c.json({ success: true, data });
-    } catch (err) {
-        return c.json({ success: false, error: err.message }, 500);
+        // --- SMART FILTERING STEP ---
+        // Har result ko uski apni category ke threshold se check karte hain
+        const finalResults = rawData.filter(item => {
+            const requiredThreshold = config.thresholds[item.collection_name] || config.thresholds.default;
+            return item.similarity >= requiredThreshold;
+        });
+
+        // 4. Detailed Results Logging (Updated to show Filtering details)
+        console.log(`✨ Found ${rawData?.length || 0} raw matches | ✅ ${finalResults.length} passed Smart Filter:`);
+        
+        if (finalResults.length > 0) {
+            finalResults.forEach((item, index) => {
+                const reqT = config.thresholds[item.collection_name] || config.thresholds.default;
+                console.log(`${index + 1}. [${(item.similarity * 100).toFixed(2)}% Match] | ID: ${item.id} | Collection: ${item.collection_name} (Threshold: ${reqT})`);
+                console.log(`   Content Snippet: ${item.content.substring(0, 120)}...`);
+            });
+        } else {
+            console.log("⚠️ No matches passed the category-specific thresholds.");
+        }
+
+        // 5. Token Reporting
+        const inputTokens = countTokens(query);
+        const outputTokens = countTokens(JSON.stringify(finalResults || []));
+        
+        console.log("\n--- 📊 FINAL TOKEN USAGE ---");
+        console.log(`🔹 Action: UNIVERSAL_SMART_SEARCH`);
+        console.log(`📥 Input: ${inputTokens} | 📤 Output: ${outputTokens}`);
+        console.log(`💰 Total: ${inputTokens + outputTokens} Tokens`);
+        console.log(`-------------------------------------------\n`);
+
+        await logUsage("UNIVERSAL_SEARCH", inputTokens, outputTokens, "puneet_kumar");
+
+        // Response mein sirf filtered (sahi) data bhej rahe hain
+        return c.json({ 
+            success: true, 
+            count: finalResults.length,
+            results: finalResults 
+        }, 200);
+
+    } catch (error) {
+        console.error("❌ Search Error:", error.message);
+        return c.json({ error: error.message }, 500);
     }
 };
-
-*/
-
-
-
-
-
-export const searchNotes = async (c) => {
-  try {
-    const { query } = await c.req.json();
-    console.log(`\n🔎 Postman Query: "${query}"`);
-
-    // 1. Vector banao (Ollama 768 dimensions generate karega)
-    const queryEmbedding = await generateEmbedding(query);
-
-    // 2. LIVE REPORT (Technical Saboot: Index Scan dekhne ke liye)
-    const { data: report } = await supabase.rpc('get_search_report', {
-      query_embedding: queryEmbedding,
-      match_threshold: SEARCH_THRESHOLD,
-      match_count: SEARCH_COUNT
-    });
-
-    if (report) {
-      console.log("📊 --- DATABASE SCAN REPORT ---");
-      report.forEach(row => console.log(row.query_plan));
-      console.log("-------------------------------\n");
-    }
-
-    // 3. Asli Results (Database se data nikalna)
-    const { data: results, error } = await supabase.rpc('match_notes', {
-      query_embedding: queryEmbedding,
-      match_threshold: SEARCH_THRESHOLD,
-      match_count: SEARCH_COUNT,
-    });
-
-    if (error) throw error;
-
-    // 4. TERMINAL LOGS: Match Percentage check karne ke liye
-    console.log(`✨ Found ${results?.length || 0} relevant notes:`);
-    if (results && results.length > 0) {
-      results.forEach((item, index) => {
-        const score = (item.similarity * 100).toFixed(2);
-        console.log(`${index + 1}. [${score}% Match] | ${item.content.substring(0, 60)}...`);
-      });
-    } else {
-      console.log("⚠️  0 results found. Try lowering SEARCH_THRESHOLD in config.js or add better data.");
-    }
-    console.log("-------------------------------------------\n");
-
-    return c.json({ success: true, data: results });
-
-  } catch (err) {
-    console.error("❌ Search Controller Error:", err.message);
-    return c.json({ success: false, error: err.message }, 500);
-  }
-};
-
 
 
 // 1. UPDATE NOTE

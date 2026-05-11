@@ -1,5 +1,6 @@
 import { supabase } from './src/utils/supabase.js'; // Apna sahi path check kar lena
 import { generateEmbedding } from './src/services/aiService.js';
+import { countTokens, logUsage } from './src/services/tokenTracker.js';
 
 console.log("🕵️  CDC Worker is Live... Monitoring your Database for Changes!");
 
@@ -25,6 +26,8 @@ const channel = supabase
         try {
           // 1. Ollama se naya vector mangwao
           const vector = await generateEmbedding(content);
+          const inputTokens = countTokens(content); 
+          logUsage("EMBEDDING_GENERATION", inputTokens, 0);
 
           // 2. Database ko update karo naye vector ke saath aur processed ko TRUE karo
           const { error } = await supabase
@@ -40,6 +43,8 @@ const channel = supabase
           } else {
             console.log(`✅ Success! Note ${id} is now Re-indexed and TRUE.`);
           }
+          const tokens = countTokens(content);
+            logUsage("DATA_INDEXING_EMBEDDING", tokens, 0);
 
         } catch (err) {
           console.error(`❌ AI Embedding Error for ID ${id}:`, err.message);
